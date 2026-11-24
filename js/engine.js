@@ -339,7 +339,8 @@ export class Engine {
     const st = await SignalsmithStretch(off);
     const [l, r] = makeBuffers(L, R, stereoMode, s0, s1);
     await st.addBuffers([l, r], [l.buffer, r.buffer]);
-    st.schedule({ active: true, input: 0, rate, semitones: semis, output: 0 });
+    // va confermato prima di avviare il rendering, che altrimenti parte in silenzio
+    await st.schedule({ active: true, input: 0, rate, semitones: semis, output: 0 });
     const vol = off.createGain();
     vol.gain.value = Math.pow(10, volumeDb / 20);
     const lim = off.createDynamicsCompressor();
