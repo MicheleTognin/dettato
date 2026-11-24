@@ -1,0 +1,1 @@
+SignalsmithStretch.mjs: Signalsmith Stretch 1.3.2 (npm "signalsmith-stretch"), Geraint Luff / Signalsmith Audio, licenza MIT.

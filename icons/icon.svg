@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#262a33"/>
+      <stop offset="1" stop-color="#111216"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.66" cy="0.62" r="0.45">
+      <stop offset="0" stop-color="#f2a33a" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#f2a33a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="note" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffc56b"/>
+      <stop offset="1" stop-color="#ef8f22"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5d8fbd" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#8fc0ea"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+  <!-- onda: barre simmetriche attorno alla riga centrale -->
+  <g fill="url(#wave)">
+    <rect x="150" y="487" width="30" height="74" rx="15"/>
+    <rect x="206" y="438" width="30" height="172" rx="15"/>
+    <rect x="262" y="372" width="30" height="304" rx="15"/>
+    <rect x="318" y="452" width="30" height="144" rx="15"/>
+    <rect x="374" y="330" width="30" height="388" rx="15"/>
+    <rect x="430" y="408" width="30" height="232" rx="15"/>
+    <rect x="486" y="468" width="30" height="112" rx="15"/>
+  </g>
+  <!-- nota: croma -->
+  <g transform="translate(18 0)">
+    <rect x="716" y="232" width="46" height="486" rx="23" fill="url(#note)"/>
+    <path d="M740 240 C 758 334, 900 364, 862 528 C 852 478, 812 438, 740 428 Z" fill="url(#note)"/>
+    <ellipse cx="642" cy="712" rx="128" ry="94" transform="rotate(-24 642 712)" fill="url(#note)"/>
+    <ellipse cx="610" cy="682" rx="46" ry="22" transform="rotate(-24 610 682)" fill="#fff3d6" opacity="0.35"/>
+  </g>
+</svg>
