@@ -1,7 +1,7 @@
 // Dettato per iPad: interfaccia, gesti, libreria e progetti.
 import { Engine, encodeWav } from "./engine.js";
 import { MarkerList, SECTION, MEASURE, BEAT } from "./markers.js";
-import { drawMain, drawOverview, drawKeyboard, MainGeometry, RULER, LANE, fmtTime, midiAtKeyboard } from "./views.js";
+import { drawMain, drawOverview, drawKeyboard, drawSeek, seekTimeAt, MainGeometry, RULER, LANE, fmtTime, midiAtKeyboard } from "./views.js";
 import { db } from "./db.js";
 
 const A = window.DettatoAnalysis;
@@ -223,7 +223,8 @@ async function togglePlay() {
   S.playStart = start;
   updateRegion();
   S.playing = true; S.playPos = start; updatePlayButton();
-  await engine.play(start);
+  try { await engine.play(start); }
+  catch (e) { toast("L'audio non è partito: tocca di nuovo play"); }
   S.playing = engine.playing; updatePlayButton(); requestRender();
 }
 function stopPlayback() {
@@ -527,6 +528,28 @@ function ovMove(e) {
 ov.addEventListener("pointerdown", e => { ov.setPointerCapture(e.pointerId); ovMove(e); });
 ov.addEventListener("pointermove", e => { if (ov.hasPointerCapture(e.pointerId)) ovMove(e); });
 
+// barra di avanzamento: tocca o trascina per spostarti; durante l'ascolto segue il trascinamento
+const seekCv = $("seek");
+let scrub = null;
+function applyScrub(final) {
+  const t = scrub.t;
+  if (S.playing) {
+    const now = performance.now();
+    if (final || now - scrub.sent > 120) { scrub.sent = now; seekTo(t); }
+  } else seekTo(t);
+  if (t < S.viewStart || t > S.viewEnd) { const l = S.viewEnd - S.viewStart; S.viewStart = t - l * 0.1; S.viewEnd = S.viewStart + l; clampView(); }
+  dirtyView = true; requestRender();
+}
+seekCv.addEventListener("pointerdown", e => {
+  if (!S.L) return;
+  seekCv.setPointerCapture(e.pointerId);
+  scrub = { t: seekTimeAt(seekCv, e.clientX, S), sent: 0 };
+  applyScrub(false);
+});
+seekCv.addEventListener("pointermove", e => { if (scrub) { scrub.t = seekTimeAt(seekCv, e.clientX, S); applyScrub(false); } });
+seekCv.addEventListener("pointerup", e => { if (scrub) { scrub.t = seekTimeAt(seekCv, e.clientX, S); applyScrub(true); scrub = null; requestRender(); } });
+seekCv.addEventListener("pointercancel", () => { scrub = null; });
+
 // tastiera: nota di riferimento, già accordata come il disco
 const kbd = $("kbd");
 let kbdHover = -1;
@@ -539,6 +562,12 @@ kbd.addEventListener("pointerdown", e => {
   $("src").textContent = "Suona " + A.noteName(m, S.italian);
   setTimeout(() => { kbdHover = -1; spectrumDirty = true; requestRender(); }, 350);
 });
+
+document.addEventListener("click", e => {
+  const b = e.target.closest && e.target.closest("button");
+  if (b && e.detail > 0 && !b.closest("#dlg")) b.blur();
+});
+document.addEventListener("change", e => { const t = e.target; if (t.tagName === "SELECT" || t.type === "checkbox" || t.type === "range") t.blur(); });
 
 // ------------------------------------------------------------------ tastiera fisica
 document.addEventListener("keydown", e => {
@@ -596,6 +625,11 @@ function frame(now) {
     drawOverview(ov, S, an);
     dirtyView = false;
   }
+  const seekPos = scrub ? scrub.t : shownPos();
+  drawSeek(seekCv, S, seekPos);
+  const tp = fmtTime(seekPos, false), tl = S.L ? fmtTime(S.duration, false) : "0:00";
+  if ($("tmPos").textContent !== tp) $("tmPos").textContent = tp;
+  if ($("tmLen").textContent !== tl) $("tmLen").textContent = tl;
   if (S.playing || spectrumDirty || (analysing && now - lastSpectrum > 400)) {
     if (now - lastSpectrum > (S.playing ? 90 : 0) || spectrumDirty) { updateSpectrum(); lastSpectrum = now; spectrumDirty = false; }
   }
@@ -695,7 +729,9 @@ async function saveProject() {
     await db.touchSong(S.song.id, { markers: S.markers.items.filter(m => m.type === MEASURE).length, opened: Date.now() });
   } catch (e) { /* spazio esaurito o archivio non disponibile */ }
 }
-document.addEventListener("visibilitychange", () => { if (document.hidden) saveProject(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { if (S.playing) stopPlayback(); saveProject(); }
+});
 window.addEventListener("pagehide", saveProject);
 
 function projectState() {
@@ -769,7 +805,6 @@ async function importProjectFile(file) {
     if (match) { await openFromLibrary(match.id); applyProjectState(v); markDirty(); toast("Progetto applicato a " + match.name); return; }
     if (!S.L) { toast("Apri prima il brano " + (audioName || "del progetto") + ", poi importa il progetto", 4000); return; }
   }
-  S.markers.checkpoint();
   applyProjectState(v);
   markDirty();
   toast(audioName && audioName !== S.song.name ? "Progetto di «" + audioName + "» applicato a questo brano" : "Progetto importato");
@@ -794,32 +829,40 @@ $("exportAudio").addEventListener("click", async () => {
 async function openFile(file) {
   if (/\.(dettato|json)$/i.test(file.name)) return importProjectFile(file);
   busy("Apro " + file.name + "…");
+  let buf, keep = null;
   try {
     const ab = await file.arrayBuffer();
-    const buf = await engine.decode(ab);
-    const song = { id: file.name + "|" + file.size, name: file.name, size: file.size };
-    let stored = true;
-    try {
-      const old = await db.getSong(song.id);
-      await db.putSong({ ...song, type: file.type, duration: buf.duration, added: old ? old.added : Date.now(), opened: Date.now(), markers: old ? old.markers : 0, blob: file });
-      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-    } catch (e) { stored = false; }
-    await loadDecoded(buf, song);
-    if (!stored) toast("Il brano è aperto, ma non c'è spazio per tenerlo nella libreria", 4000);
+    try { keep = ab.slice(0); } catch (e) { keep = null; }   // copia per la libreria: la decodifica consuma l'originale
+    buf = await engine.decode(ab);
   } catch (e) {
     busy(null);
     toast("Non riesco a leggere «" + file.name + "». L'iPad apre MP3, M4A/AAC, WAV, AIFF, CAF, FLAC e l'audio dei video.", 5000);
+    return;
   }
+  const song = { id: file.name + "|" + file.size, name: file.name, size: file.size };
+  let stored = true;
+  try {
+    const old = await db.getSong(song.id), has = old ? await db.hasAudio(song.id) : false;
+    const meta = { ...song, type: file.type, duration: buf.duration, added: old ? old.added : Date.now(), opened: Date.now(), markers: old ? old.markers || 0 : 0 };
+    await db.putSong(meta, has ? null : keep);
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  } catch (e) { stored = false; }
+  keep = null;
+  try { await loadDecoded(buf, song); }
+  catch (e) { busy(null); toast("Il brano non si è aperto: " + (e.message || e), 5000); return; }
+  if (!stored) toast("Il brano è aperto, ma non posso tenerlo nella libreria (spazio pieno o navigazione privata)", 5000);
 }
 async function openFromLibrary(id) {
-  const s = await db.getSong(id);
-  if (!s || !s.blob) { toast("Brano non trovato"); return; }
+  const s = await db.getSong(id).catch(() => null);
+  if (!s) { toast("Brano non trovato"); return; }
   busy("Apro " + s.name + "…");
   try {
-    const buf = await engine.decode(await s.blob.arrayBuffer());
-    await db.touchSong(id, { opened: Date.now() });
+    const data = await db.getAudio(id);
+    if (!data) throw new Error("audio mancante");
+    const buf = await engine.decode(data);
+    await db.touchSong(id, { opened: Date.now() }).catch(() => {});
     await loadDecoded(buf, { id: s.id, name: s.name, size: s.size });
-  } catch (e) { busy(null); toast("Non riesco ad aprire «" + s.name + "»"); }
+  } catch (e) { busy(null); toast("Non riesco ad aprire «" + s.name + "». Riaprilo dall'app File.", 5000); }
 }
 async function loadDecoded(buf, song) {
   if (S.playing) stopPlayback();

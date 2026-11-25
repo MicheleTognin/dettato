@@ -28,6 +28,8 @@ export const isBlack = m => [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12);
 
 export function fmtTime(s, hundredths = true) {
   if (!(s > 0)) s = 0;
+  // arrotonda prima di separare minuti e secondi: 3,9999999 deve diventare 0:04, non 0:03
+  s = hundredths ? Math.round(s * 100) / 100 : Math.floor(s + 1e-6);
   const m = Math.floor(s / 60), r = s - m * 60;
   if (hundredths) { const t = r.toFixed(2); return m + ":" + (r < 10 ? "0" : "") + t; }
   return m + ":" + String(Math.floor(r)).padStart(2, "0");
@@ -53,14 +55,51 @@ export class MainGeometry {
 }
 
 const rollCache = { key: "", canvas: null };
+const layer = { key: "", canvas: null };
 
+function markersKey(S) {
+  let k = S.markers.firstMeasure + ":" + S.markers.size;
+  for (const m of S.markers.items) k += "," + m.type + m.time.toFixed(4) + m.label;
+  return k;
+}
+
+// La parte fissa (righello, marker, onda o piano roll, selezione, cursore) si ridisegna solo quando cambia;
+// a ogni fotogramma si aggiunge soltanto la testina.
 export function drawMain(canvas, S, an) {
-  const { g, w, h } = fit(canvas);
+  const { g, w, h, dpr } = fit(canvas);
   const geo = new MainGeometry(S, w, h);
-  g.fillStyle = C.bg; g.fillRect(0, 0, w, h);
-  if (!S.L) return geo;
-  const top = RULER + LANE, ch = h - top;
+  if (!S.L) { g.fillStyle = C.bg; g.fillRect(0, 0, w, h); layer.key = ""; return geo; }
+  const key = [w, h, dpr, S.viewStart.toFixed(5), S.viewEnd.toFixed(5), S.showNotes, S.selStart.toFixed(4), S.selEnd.toFixed(4),
+    S.cursor.toFixed(4), S.italian, S.transpose, S.mono, S.selMarker ? S.markers.indexOf(S.selMarker) : -1, markersKey(S),
+    an ? an.id + ":" + (an.peaks ? 1 : 0) + ":" + Math.floor(an.done / 200) : 0].join("|");
+  if (key !== layer.key || !layer.canvas) {
+    layer.key = key;
+    const cv = layer.canvas || (layer.canvas = document.createElement("canvas"));
+    cv.width = canvas.width; cv.height = canvas.height;
+    const lg = cv.getContext("2d");
+    lg.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawStatic(lg, geo, S, an, w, h);
+  }
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.drawImage(layer.canvas, 0, 0);
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (S.playing && S.playPos >= S.viewStart && S.playPos <= S.viewEnd) drawPlayhead(g, geo.timeToX(S.playPos), h);
+  return geo;
+}
 
+function drawPlayhead(g, x, h) {
+  g.save();
+  g.shadowColor = "rgba(255,210,122,0.55)"; g.shadowBlur = 8;
+  g.fillStyle = C.playhead;
+  g.fillRect(x - 1.25, RULER, 2.5, h - RULER);
+  g.shadowBlur = 0;
+  g.beginPath(); g.moveTo(x - 8, 0); g.lineTo(x + 8, 0); g.lineTo(x, 13); g.closePath(); g.fill();
+  g.restore();
+}
+
+function drawStatic(g, geo, S, an, w, h) {
+  g.fillStyle = C.bg; g.fillRect(0, 0, w, h);
+  const top = RULER + LANE, ch = h - top;
   drawRuler(g, geo, w);
   drawLane(g, geo, S, w);
   if (S.showNotes) drawRoll(g, geo, S, an, top, w, ch); else drawWave(g, geo, S, an, top, w, ch);
@@ -79,8 +118,9 @@ export function drawMain(canvas, S, an) {
     if (x1 > x0) {
       g.fillStyle = "rgba(242,163,58,0.15)"; g.fillRect(x0, RULER, x1 - x0, h - RULER);
       g.fillStyle = C.accent;
-      for (const [t, x] of [[S.selStart, geo.timeToX(S.selStart)], [S.selEnd, geo.timeToX(S.selEnd)]]) {
+      for (const t of [S.selStart, S.selEnd]) {
         if (t < S.viewStart || t > S.viewEnd) continue;
+        const x = geo.timeToX(t);
         g.fillRect(Math.round(x) - 1, RULER, 2, h - RULER);
         // maniglie da trascinare con il dito
         g.beginPath(); g.arc(x, h - 18, 9, 0, Math.PI * 2); g.fill();
@@ -88,14 +128,12 @@ export function drawMain(canvas, S, an) {
     }
   }
 
-  // cursore e testina
+  // cursore (punto di partenza)
   if (S.cursor >= S.viewStart && S.cursor <= S.viewEnd) {
-    g.fillStyle = "rgba(79,195,176,0.9)"; g.fillRect(Math.round(geo.timeToX(S.cursor)), RULER, 1.5, h - RULER);
+    const x = geo.timeToX(S.cursor);
+    g.fillStyle = "rgba(79,195,176,0.95)"; g.fillRect(Math.round(x) - 0.75, RULER, 1.5, h - RULER);
+    g.beginPath(); g.moveTo(x - 6, RULER); g.lineTo(x + 6, RULER); g.lineTo(x, RULER + 9); g.closePath(); g.fill();
   }
-  if (S.playing && S.playPos >= S.viewStart && S.playPos <= S.viewEnd) {
-    g.fillStyle = C.playhead; g.fillRect(geo.timeToX(S.playPos) - 1, 0, 2, h);
-  }
-  return geo;
 }
 
 function drawRuler(g, geo, w) {
@@ -106,10 +144,12 @@ function drawRuler(g, geo, w) {
   let step = 600; for (const s of steps) if (s * pxPerSec >= 84) { step = s; break; }
   const minor = step / 5;
   g.font = "11px -apple-system, system-ui, sans-serif"; g.textBaseline = "middle";
-  for (let t = Math.floor(S.viewStart / minor) * minor; t <= S.viewEnd; t += minor) {
-    if (t < 0) continue;
+  // posizioni calcolate da un indice intero, senza sommare errori di arrotondamento
+  const perMajor = 5;
+  for (let i = Math.max(0, Math.floor(S.viewStart / minor)); i * minor <= S.viewEnd + 1e-9; i++) {
+    const t = Math.round(i * minor * 1000) / 1000;
     const x = Math.round(geo.timeToX(t)) + 0.5;
-    const major = Math.abs(t / step - Math.round(t / step)) < 1e-6;
+    const major = i % perMajor === 0;
     g.strokeStyle = major ? "rgba(150,156,165,0.9)" : "rgba(150,156,165,0.35)";
     g.beginPath(); g.moveTo(x, RULER - (major ? 8 : 4)); g.lineTo(x, RULER); g.stroke();
     if (major) { g.fillStyle = C.dim; g.fillText(fmtTime(t, step < 1).replace(/\.00$/, ""), x + 4, RULER / 2 - 1); }
@@ -254,37 +294,68 @@ export function drawOverview(canvas, S, an) {
   for (const m of S.markers.items) if (m.type === SECTION) g.fillRect(Math.round(tx(m.time)), 0, 1, h);
   g.strokeStyle = "rgba(233,230,225,0.75)"; g.lineWidth = 1.5;
   g.strokeRect(tx(S.viewStart), 1, Math.max(4, tx(S.viewEnd) - tx(S.viewStart)), h - 2);
+  const pos = S.playing ? S.playPos : S.cursor, px = tx(pos);
+  if (S.playing) { g.fillStyle = "rgba(255,210,122,0.16)"; g.fillRect(0, 0, px, h); }
   g.fillStyle = S.playing ? C.playhead : C.cursor;
-  g.fillRect(Math.round(tx(S.playing ? S.playPos : S.cursor)), 0, 1.5, h);
+  g.fillRect(Math.round(px) - 1, 0, 2, h);
+}
+
+// barra di avanzamento: brano intero, parte ascoltata, selezione, sezioni e cursore
+export function drawSeek(canvas, S, pos) {
+  const { g, w, h } = fit(canvas);
+  g.clearRect(0, 0, w, h);
+  const pad = 10, tw = Math.max(1, w - 2 * pad), cy = Math.round(h / 2), len = Math.max(0.001, S.duration);
+  const tx = t => pad + Math.min(1, Math.max(0, t / len)) * tw;
+  g.fillStyle = C.line; roundRect(g, pad, cy - 3, tw, 6, 3); g.fill();
+  if (!S.L) return;
+  if (S.selEnd - S.selStart > 0.01) { g.fillStyle = "rgba(242,163,58,0.35)"; g.fillRect(tx(S.selStart), cy - 7, Math.max(2, tx(S.selEnd) - tx(S.selStart)), 14); }
+  g.fillStyle = S.playing ? C.playhead : C.accent;
+  roundRect(g, pad, cy - 3, Math.max(6, tx(pos) - pad), 6, 3); g.fill();
+  g.fillStyle = C.section;
+  for (const m of S.markers.items) if (m.type === SECTION) g.fillRect(Math.round(tx(m.time)) - 1, cy - 11, 2, 6);
+  const x = tx(pos);
+  g.save(); g.shadowColor = "rgba(0,0,0,0.5)"; g.shadowBlur = 6;
+  g.fillStyle = "#fff6e3"; g.beginPath(); g.arc(x, cy, 9, 0, Math.PI * 2); g.fill(); g.restore();
+  g.fillStyle = S.playing ? C.playhead : C.accent; g.beginPath(); g.arc(x, cy, 5, 0, Math.PI * 2); g.fill();
+}
+export function seekTimeAt(canvas, clientX, S) {
+  const r = canvas.getBoundingClientRect(), pad = 10, tw = Math.max(1, r.width - 2 * pad);
+  return Math.min(1, Math.max(0, (clientX - r.left - pad) / tw)) * S.duration;
 }
 
 // --- tastiera con lo spettro ---
+export function kbRange(w) {
+  if (w >= 640) return [KB_LOW, KB_HIGH];      // 88 tasti
+  if (w >= 420) return [36, 96];               // Do1–Do6 (italiano)
+  return [48, 84];                             // Do2–Do5
+}
 export function keyRects(w, h) {
-  let whites = 0; for (let m = KB_LOW; m <= KB_HIGH; m++) if (!isBlack(m)) whites++;
+  const [lo, hi] = kbRange(w);
+  let whites = 0; for (let m = lo; m <= hi; m++) if (!isBlack(m)) whites++;
   const ww = w / whites, keyTop = h * 0.5, keyH = h * 0.5, rects = {};
   let idx = 0;
-  for (let m = KB_LOW; m <= KB_HIGH; m++) {
+  for (let m = lo; m <= hi; m++) {
     if (!isBlack(m)) { rects[m] = { x: idx * ww, y: keyTop, w: ww, h: keyH, black: false }; idx++; }
     else { const bw = ww * 0.62; rects[m] = { x: idx * ww - bw / 2, y: keyTop, w: bw, h: keyH * 0.62, black: true }; }
   }
-  return { rects, ww, barTop: 0, barBottom: h * 0.48 };
+  return { rects, ww, lo, hi, barTop: 0, barBottom: h * 0.48 };
 }
 
 export function midiAtKeyboard(x, y, w, h) {
-  const { rects } = keyRects(w, h);
-  for (let m = KB_LOW; m <= KB_HIGH; m++) { const r = rects[m]; if (r.black && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return m; }
-  for (let m = KB_LOW; m <= KB_HIGH; m++) { const r = rects[m]; if (!r.black && x >= r.x && x <= r.x + r.w) return m; }
+  const { rects, lo, hi } = keyRects(w, h);
+  for (let m = lo; m <= hi; m++) { const r = rects[m]; if (r.black && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return m; }
+  for (let m = lo; m <= hi; m++) { const r = rects[m]; if (!r.black && x >= r.x && x <= r.x + r.w) return m; }
   return -1;
 }
 
 export function drawKeyboard(canvas, S, sum, hover) {
   const { g, w, h } = fit(canvas);
   g.fillStyle = C.panel; g.fillRect(0, 0, w, h);
-  const { rects, ww, barBottom } = keyRects(w, h);
+  const { rects, ww, barBottom, lo, hi } = keyRects(w, h);
   const tr = S.transpose, strong = new Set();
   if (sum) for (const m of sum.topNotes) strong.add(m + tr);
   for (const pass of [false, true])
-    for (let m = KB_LOW; m <= KB_HIGH; m++) {
+    for (let m = lo; m <= hi; m++) {
       const r = rects[m]; if (r.black !== pass) continue;
       let fill = r.black ? "#1a1b20" : "#d9d6d0";
       if (strong.has(m)) fill = r.black ? "#b87828" : C.accent;
@@ -298,7 +369,7 @@ export function drawKeyboard(canvas, S, sum, hover) {
   g.fillStyle = C.bg; g.fillRect(0, 0, w, barBottom);
   if (sum && sum.valid) {
     for (let k = 0; k < A.NUM_NOTES; k++) {
-      const m = k + A.LOW_MIDI + tr; if (m < KB_LOW || m > KB_HIGH) continue;
+      const m = k + A.LOW_MIDI + tr; if (m < lo || m > hi) continue;
       const v = sum.levels[k]; if (v <= 0.01) continue;
       const r = rects[m], bh = v * (barBottom - 3), bw = ww * 0.56;
       const [cr, cg, cb] = heat(0.25 + 0.6 * v);

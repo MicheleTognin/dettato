@@ -70,6 +70,7 @@ export class Engine {
       this.fx = ctx.createGain();
       this.stretch.connect(this.fader);
       this.eqNodes = buildEq(ctx, this.fader, this.volume, this.eq);
+      this.eqKey = JSON.stringify(this.eq);
       this.volume.connect(this.limiter);
       this.limiter.connect(ctx.destination);
       this.fx.connect(ctx.destination);
@@ -110,6 +111,10 @@ export class Engine {
   }
 
   setEq(eq) {
+    // si ricollega solo se l'equalizzatore è davvero cambiato: ricollegare a ogni regolazione crea piccoli vuoti
+    const k = JSON.stringify(eq);
+    if (k === this.eqKey && this.ctx) return;
+    this.eqKey = k;
     this.eq = { ...eq };
     if (!this.ctx) return;
     this.fader.disconnect();
@@ -134,14 +139,22 @@ export class Engine {
   setClicks(list) { this.clicks = list.slice().sort((a, b) => a.time - b.time); if (this.playing) { this._cancelClicks(this.ctx.currentTime); this.clickMark = this.ctx.currentTime; } }
 
   // --- tempo ---
+  // tempo del contesto audio che si sta ascoltando adesso, interpolato per un movimento fluido
   audibleTime() {
     const ctx = this.ctx;
     if (!ctx) return 0;
+    const now = performance.now(), ct = ctx.currentTime;
     if (ctx.getOutputTimestamp) {
       const ts = ctx.getOutputTimestamp();
-      if (ts && ts.contextTime > 0 && ts.contextTime <= ctx.currentTime + 0.01) return ts.contextTime;
+      if (ts && ts.contextTime > 0 && ts.performanceTime > 0) {
+        const t = ts.contextTime + Math.max(0, Math.min(0.2, (now - ts.performanceTime) / 1000));
+        if (t <= ct + 0.05 && t >= ct - 0.5) return t;
+      }
     }
-    return Math.max(0, ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0));
+    // Safari meno recenti: currentTime avanza a scatti, lo interpolo con l'orologio della pagina
+    if (ct !== this._ct) { this._ct = ct; this._ctAt = now; }
+    const lat = (ctx.outputLatency || 0) + (ctx.baseLatency || 0);
+    return Math.max(0, ct + Math.min(0.1, (now - this._ctAt) / 1000) - lat);
   }
 
   inputAt(T) {
@@ -180,7 +193,10 @@ export class Engine {
 
   async play(from) {
     await this.init();
-    if (this.ctx.state !== "running") { try { await this.ctx.resume(); } catch (e) { /* richiede un tocco */ } }
+    if (this.ctx.state !== "running") {
+      // su iPad resume() può restare in attesa se manca il tocco: non aspetto più di 1,5 s
+      try { await Promise.race([this.ctx.resume(), new Promise(r => setTimeout(r, 1500))]); } catch (e) { /* richiede un tocco */ }
+    }
     if (!this.L) return;
     const ctx = this.ctx, T = ctx.currentTime + LEAD;
     this.fader.gain.cancelScheduledValues(0);
