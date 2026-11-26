@@ -137,7 +137,7 @@ function applyControls() {
   engine.setEq({ hpOn: c.hpOn, hpHz: c.hpHz, lpOn: c.lpOn, lpHz: c.lpHz, peakOn: c.peakOn, peakHz: c.peakHz, peakDb: c.peakDb });
   engine.setGap(+c.gap);
   engine.setMetronome(c.metronome, c.metroVolume / 100);
-  if (S.transpose !== c.semitones) { S.transpose = c.semitones; dirtyView = true; }
+  if (S.transpose !== c.semitones) { S.transpose = c.semitones; dirtyView = true; spectrumDirty = true; }
   syncLabels();
   requestRender();
 }
@@ -172,7 +172,7 @@ $("returnToStart").addEventListener("change", e => changed({ returnToStart: e.ta
 $("metronome").addEventListener("change", e => changed({ metronome: e.target.checked }));
 $("metroVol").addEventListener("input", e => changed({ metroVolume: +e.target.value }));
 $("notes").addEventListener("input", e => { S.ctl.notes = e.target.value; markDirty(); });
-$("italian").addEventListener("change", e => { S.italian = e.target.checked; prefs.italian = S.italian; savePrefs(); dirtyView = true; requestRender(); });
+$("italian").addEventListener("change", e => { S.italian = e.target.checked; prefs.italian = S.italian; savePrefs(); dirtyView = true; spectrumDirty = true; requestRender(); });
 
 // pannello
 function setPanel(open, remember = true) {
@@ -552,7 +552,7 @@ kbd.addEventListener("pointerdown", e => {
   const tune = (an && an.tuningReady ? an.tuning : 0) + S.ctl.cents;
   engine.tone(440 * Math.pow(2, (m - 69) / 12 + tune / 1200));
   kbdHover = m; spectrumDirty = true; requestRender();
-  $("src").textContent = "Suona " + A.noteName(m, S.italian);
+  $("src").textContent = "Suona " + A.noteName(m, S.italian, songKey());
   setTimeout(() => { kbdHover = -1; spectrumDirty = true; requestRender(); }, 350);
 });
 
@@ -659,6 +659,9 @@ function updateHeader() {
   if (info !== lastInfo) { $("info").textContent = info; lastInfo = info; }
 }
 
+/* tonalità stimata sull'intero brano, trasposta come l'ascolto */
+function songKey() { return an && an.key ? A.transposeKey(an.key, S.transpose) : null; }
+
 function updateSpectrum() {
   let sum = null, src = "";
   if (an && an.done > 0) {
@@ -669,14 +672,18 @@ function updateSpectrum() {
     else { a = pos - 0.15; b = pos + 0.15; src = "Al cursore, " + fmtTime(pos); }
     sum = A.summarize(an.notes, an.done, an.maxAmp, fa(a), fa(b));
   } else if (S.L) src = "Analisi in corso…";
-  const tr = S.transpose, it = S.italian;
+  // nomi coerenti: alterazioni secondo la tonalità del brano, note dell'accordo scritte come intervalli
+  const tr = S.transpose, it = S.italian, key = songKey();
   if (!sum || !sum.valid) { $("chord").textContent = "–"; $("alts").innerHTML = "&nbsp;"; $("topNotes").innerHTML = "&nbsp;"; }
-  else if (sum.silent || !sum.chords.length) { $("chord").textContent = "N.C."; $("alts").innerHTML = "&nbsp;"; $("topNotes").textContent = sum.topNotes.map(m => A.noteName(m + tr, it)).join("  ") || " "; }
+  else if (sum.silent || !sum.chords.length) { $("chord").textContent = "N.C."; $("alts").innerHTML = "&nbsp;"; $("topNotes").textContent = sum.topNotes.map(m => A.noteName(m + tr, it, key)).join("  ") || " "; }
   else {
-    $("chord").textContent = A.chordName(sum.chords[0], tr, it);
-    $("alts").textContent = "oppure  " + sum.chords.slice(1).map(c => A.chordName(c, tr, it)).join("   ");
-    $("topNotes").textContent = sum.topNotes.map(m => A.noteName(m + tr, it)).join("  ");
+    const sp = A.spellChord(sum.chords[0], tr, key);
+    $("chord").textContent = A.chordName(sum.chords[0], tr, it, key);
+    $("alts").textContent = "oppure  " + sum.chords.slice(1).map(c => A.chordName(c, tr, it, key)).join("   ");
+    $("topNotes").textContent = sum.topNotes.map(m => A.noteName(m + tr, it, key, sp)).join("  ");
   }
+  const ki = !an ? "" : an.key ? "Tonalità probabile: " + A.keyName(key, it) : an.numFrames && an.done >= an.numFrames ? "Tonalità: non riconosciuta" : "Tonalità: in analisi";
+  if ($("keyInfo").textContent !== ki) $("keyInfo").textContent = ki;
   if (kbdHover < 0) $("src").textContent = src;
   drawKeyboard(kbd, S, sum, kbdHover);
 }
@@ -710,7 +717,10 @@ function startAnalysis() {
       $("fixTuning").disabled = Math.abs(d.cents) < 1;
     }
     else if (d.type === "info") { an.hop = d.hop; an.numFrames = d.numFrames; an.notes = new Float32Array(d.numFrames * A.NUM_NOTES); }
-    else if (d.type === "frames") { an.notes.set(d.data, d.start * A.NUM_NOTES); an.maxAmp = d.maxAmp; an.done = d.start + d.data.length / A.NUM_NOTES; spectrumDirty = true; }
+    else if (d.type === "frames") {
+      an.notes.set(d.data, d.start * A.NUM_NOTES); an.maxAmp = d.maxAmp; an.done = d.start + d.data.length / A.NUM_NOTES; spectrumDirty = true;
+      if (an.done >= an.numFrames) an.key = A.estimateKey(an.notes, an.done, an.maxAmp, an.hop);
+    }
     requestRender();
   };
   worker.onerror = () => toast("L'analisi delle note non è riuscita");
