@@ -1,5 +1,5 @@
 // Dettato: funziona anche senza rete. Cambiare VERSION a ogni aggiornamento.
-const VERSION = "dettato-1.0.2";
+const VERSION = "dettato-1.0.3";
 const FILES = [
   "./", "index.html", "manifest.webmanifest", "analysis-core.js", "analysis-worker.js",
   "js/app.js", "js/engine.js", "js/markers.js", "js/views.js", "js/db.js", "vendor/SignalsmithStretch.mjs",

@@ -51,13 +51,21 @@ export class Engine {
     this.eqNodes = []; this.eq = {};
     this.onEnded = null;
     this.timer = null;
+    this.bufRate = 0;        // frequenza dei campioni del brano caricato
+    this.rateScale = 1;      // bufRate / frequenza del contesto (diversa solo se l'iPad cambia uscita audio)
+    this.volumeDb = 0;
+    this.rebuilding = null;
   }
 
   init() {
     if (this.ready) return this.ready;
     this.ready = (async () => {
       const AC = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new AC({ latencyHint: "interactive" });
+      // stessa frequenza del brano già decodificato, se il sistema lo permette
+      try { this.ctx = new AC(this.bufRate ? { latencyHint: "interactive", sampleRate: this.bufRate } : { latencyHint: "interactive" }); }
+      catch (e) { this.ctx = new AC({ latencyHint: "interactive" }); }
+      this.rateScale = this.bufRate ? this.bufRate / this.ctx.sampleRate : 1;
+      this._unlocked = false;
       try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) { /* non supportato */ }
       const ctx = this.ctx;
       this.stretch = await SignalsmithStretch(ctx);
@@ -71,6 +79,7 @@ export class Engine {
       this.stretch.connect(this.fader);
       this.eqNodes = buildEq(ctx, this.fader, this.volume, this.eq);
       this.eqKey = JSON.stringify(this.eq);
+      this.volume.gain.value = Math.pow(10, (this.volumeDb || 0) / 20);
       this.volume.connect(this.limiter);
       this.limiter.connect(ctx.destination);
       this.fx.connect(ctx.destination);
@@ -80,7 +89,44 @@ export class Engine {
   }
 
   get sampleRate() { return this.ctx ? this.ctx.sampleRate : 48000; }
-  get duration() { return this.L ? this.L.length / this.ctx.sampleRate : 0; }
+  get duration() { return this.L ? this.L.length / (this.bufRate || this.ctx.sampleRate) : 0; }
+
+  // da chiamare dentro il gestore del tocco: su iPad l'audio può ripartire solo lì
+  unlock() {
+    const ctx = this.ctx; if (!ctx) return;
+    if (ctx.state !== "running" && ctx.state !== "closed") ctx.resume().catch(() => {});
+    if (!this._unlocked && ctx.state !== "closed") {
+      try {
+        const b = ctx.createBuffer(1, 1, ctx.sampleRate), src = ctx.createBufferSource();
+        src.buffer = b; src.connect(ctx.destination); src.start(0); this._unlocked = true;
+      } catch (e) { /* contesto non utilizzabile: lo ricrea rebuild() */ }
+    }
+  }
+
+  // Ricrea da zero contesto audio, motore e collegamenti, poi ricarica il brano.
+  // Serve al rientro nell'app: iPadOS a volte lascia il vecchio contesto sospeso per sempre.
+  rebuild() {
+    if (this.rebuilding) return this.rebuilding;
+    this.rebuilding = (async () => {
+      const old = this.ctx;
+      this.playing = false; this.passes = []; this.stopAt = 0; this.scheduledClicks = [];
+      if (this.timer) { clearInterval(this.timer); this.timer = null; }
+      await (this.ready || Promise.resolve()).catch(() => {});
+      this.ready = null; this.ctx = null; this.stretch = null; this.eqKey = undefined;
+      try { if (old && old.state !== "closed") await Promise.race([old.close(), new Promise(r => setTimeout(r, 500))]); } catch (e) { /* già chiuso */ }
+      await this.init();
+      if (this.L) await this.reloadBuffers();
+    })().finally(() => { this.rebuilding = null; });
+    return this.rebuilding;
+  }
+
+  // vero se l'audio dovrebbe suonare ma l'orologio del contesto è fermo da più di 1,5 s
+  stalled() {
+    if (!this.playing || !this.ctx) return false;
+    const now = performance.now(), ct = this.ctx.currentTime;
+    if (ct !== this._wdT) { this._wdT = ct; this._wdAt = now; return false; }
+    return now - this._wdAt > 1500;
+  }
 
   async decode(arrayBuffer) {
     await this.init();
@@ -90,10 +136,13 @@ export class Engine {
     });
   }
 
-  async setAudio(L, R) {
+  async setAudio(L, R, sampleRate) {
+    if (this.rebuilding) await this.rebuilding;
     await this.init();
     this.stop();
     this.L = L; this.R = R;
+    this.bufRate = sampleRate || this.ctx.sampleRate;
+    this.rateScale = this.bufRate / this.ctx.sampleRate;
     await this.reloadBuffers();
   }
 
@@ -178,7 +227,9 @@ export class Engine {
     t = Math.min(Math.max(0, t), this.duration);
     const r = this.rate, end = this._boundary(t);
     const p = { T, t, r, end, Tend: T + Math.max(0, end - t) / r, next: false, gapTo: null };
-    this.stretch.schedule({ active: true, input: t, rate: r, semitones: this.semis, output: T });
+    // con rateScale ≠ 1 i tempi e l'intonazione vanno riportati alla frequenza del contesto
+    const k = this.rateScale || 1;
+    this.stretch.schedule({ active: true, input: t * k, rate: r * k, semitones: this.semis + (k !== 1 ? 12 * Math.log2(k) : 0), output: T });
     this.passes.push(p);
     if (this.passes.length > 8) this.passes.splice(0, this.passes.length - 8);
     return p;
@@ -192,6 +243,7 @@ export class Engine {
   }
 
   async play(from) {
+    if (this.rebuilding) await this.rebuilding;
     await this.init();
     if (this.ctx.state !== "running") {
       // su iPad resume() può restare in attesa se manca il tocco: non aspetto più di 1,5 s
@@ -210,6 +262,7 @@ export class Engine {
     this._startPass(T, from);
     this.clickMark = T;
     this.playing = true;
+    this._wdT = ctx.currentTime; this._wdAt = performance.now();
     this._tick();
     if (!this.timer) this.timer = setInterval(() => this._tick(), 40);
   }

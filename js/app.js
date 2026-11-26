@@ -203,14 +203,7 @@ function zoomAround(t, factor) {
 }
 
 // ------------------------------------------------------------------ trasporto
-function unlockAudio() {
-  const ctx = engine.ctx; if (!ctx) return;
-  if (ctx.state !== "running") ctx.resume().catch(() => {});
-  if (!unlockAudio.done) {
-    const b = ctx.createBuffer(1, 1, ctx.sampleRate), s = ctx.createBufferSource();
-    s.buffer = b; s.connect(ctx.destination); s.start(0); unlockAudio.done = true;
-  }
-}
+function unlockAudio() { engine.unlock(); }
 document.addEventListener("pointerdown", unlockAudio, true);
 document.addEventListener("keydown", unlockAudio, true);
 
@@ -610,6 +603,13 @@ let renderPending = false, dirtyView = true, spectrumDirty = true, lastSpectrum 
 function requestRender() { if (!renderPending) { renderPending = true; requestAnimationFrame(frame); } }
 function frame(now) {
   renderPending = false;
+  if (S.playing && engine.stalled()) {
+    // l'audio si è interrotto (telefonata, Siri, uscita dall'app): mi fermo e preparo un motore nuovo
+    engine.stop();
+    S.playing = false; updatePlayButton(); dirtyView = true;
+    toast("L'audio si era interrotto: tocca play per ripartire", 4000);
+    engine.rebuild().then(() => { applyControls(); updateRegion(); updateClicks(); }).catch(() => {});
+  }
   if (S.playing) {
     const p = engine.position();
     if (p != null) S.playPos = p;
@@ -729,10 +729,19 @@ async function saveProject() {
     await db.touchSong(S.song.id, { markers: S.markers.items.filter(m => m.type === MEASURE).length, opened: Date.now() });
   } catch (e) { /* spazio esaurito o archivio non disponibile */ }
 }
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) { if (S.playing) stopPlayback(); saveProject(); }
-});
-window.addEventListener("pagehide", saveProject);
+// Uscita e rientro: iPadOS sospende l'audio quando l'app va in secondo piano e a volte non lo lascia
+// più ripartire. Fermo la riproduzione all'uscita e al rientro ricreo il motore audio da zero.
+let wentAway = false;
+function leaveApp() { wentAway = true; if (S.playing) stopPlayback(); saveProject(); }
+function backToApp() {
+  if (!wentAway) return;
+  wentAway = false;
+  engine.rebuild().then(() => { applyControls(); updateRegion(); updateClicks(); }).catch(() => {});
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) leaveApp(); else backToApp(); });
+window.addEventListener("pagehide", leaveApp);
+window.addEventListener("pageshow", e => { if (e.persisted) wentAway = true; backToApp(); });
+
 
 function projectState() {
   const c = S.ctl;
@@ -873,7 +882,7 @@ async function loadDecoded(buf, song) {
   S.markers = new MarkerList(); S.selMarker = null;
   S.cursor = S.playStart = S.selStart = S.selEnd = 0; S.viewStart = 0; S.viewEnd = S.duration; S.playing = false;
   S.ctl = { ...DEFAULTS }; S.loop = true;
-  await engine.setAudio(S.L, S.R);
+  await engine.setAudio(S.L, S.R, S.sampleRate);
   syncControls(); applyControls(); updateRegion(); updateClicks();
   startAnalysis();
   const saved = await db.getProject(song.id).catch(() => null);
